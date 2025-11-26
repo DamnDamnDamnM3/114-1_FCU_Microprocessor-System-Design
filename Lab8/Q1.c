@@ -6,7 +6,7 @@
 #include "LCD.h"
 #include "Scankey.h"
 
-#define RIGHT_BOUND 112   // 128 - 16 = 112
+#define RIGHT_BOUND 120 // 128 - 8 = 112
 
 typedef struct {
     int num;
