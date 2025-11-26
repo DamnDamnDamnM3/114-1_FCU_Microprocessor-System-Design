@@ -1,245 +1,268 @@
-/* ===============================================================
- * Lab 8.2 - PingPong  (C89 Compatible Version)
- *
- * Notes:
- * 1. Fixes C89 issue (#268): all local variable declarations
- *    appear at the beginning of a block.
- * 2. Improves paddle smoothness and prevents ADC “jumping”
- *    by applying speed limiting logic (MAX_PADDLE_SPEED).
- * =============================================================== */
-
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
+#include <string.h>
 #include "NUC100Series.h"
 #include "MCU_init.h"
 #include "SYS_init.h"
 #include "LCD.h"
-#include "Draw2D.h" 
+#include "Scankey.h"
 
-// ==================== LCD Settings ====================
-#define LCD_WIDTH       128
-#define LCD_HEIGHT      64
+// --- ?????? ---
+#define LCD_W 128
+#define LCD_H 64
+#define BUZZER_PIN 11 
 
-// ==================== Object Sizes ====================
-#define BALL_SIZE       8
-#define PADDLE_WIDTH    16
-#define PADDLE_HEIGHT   8
-#define OBSTACLE_WIDTH  16
-#define OBSTACLE_HEIGHT 8
+// [?? 1] ???? Slide 24,VR1 ?? ADC7
+#define ADC_VR_CHANNEL 7 
 
-// ==================== Game Settings ====================
-#define BALL_SPEED      3
-#define VR_CHANNEL      7
-#define GAME_DELAY_TIME 100000      // 0.1s per frame (SysTickDelay units)
+// --- ?????? ---
+#define BALL_SIZE 8
+#define PADDLE_W 16
+#define PADDLE_H 8
+#define OBSTACLE_W 16
+#define OBSTACLE_H 8
 
-#define PADDLE_Y        (LCD_HEIGHT - PADDLE_HEIGHT - 1)
-#define OBSTACLE_X      56
-#define OBSTACLE_Y      16
+// --- ???? ---
+typedef enum {
+    STATE_INIT,
+    STATE_PLAYING,
+    STATE_GAMEOVER
+} GameState;
 
-// Maximum paddle change per frame (anti-jitter)
-#define MAX_PADDLE_SPEED 8 
+// --- ?????? ---
+typedef struct {
+    int x, y;
+    int w, h;
+} Rect;
 
-// ==================== Game State ====================
-// 0 = Idle (waiting to start)
-// 1 = Playing
-// 2 = Game Over
-volatile uint8_t game_state = 0;
+typedef struct {
+    int x, y;
+    int dx, dy;
+    int w, h;
+} BallObj;
 
-int16_t ball_x, ball_y;
-int16_t ball_dx, ball_dy;
-int16_t paddle_x;
+// --- ???? ---
+volatile GameState g_state = STATE_INIT;
+Rect g_paddle;   
+Rect g_obstacle; 
+BallObj g_ball;  
 
-// Previous frame positions
-int16_t old_ball_x, old_ball_y;
-int16_t old_paddle_x;
+// --- ????? ---
+unsigned char bmp_ball[8] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
 
-// ==================== External Keypad ====================
-extern void OpenKeyPad(void);
-extern uint8_t ScanKey(void);
+unsigned char bmp_block[16] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
 
-// ==================== Function Prototypes ====================
-void Init_ADC(void);
-void Init_Buzzer(void);
-uint32_t Read_VR(void);
-void Update_Game_Logic(void);
-void Draw_Game_Scene(void);
-void Beep_Short(void);
-void Check_Start_Key(void);
-void Fill_Rect(int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint8_t color);
+// --- ???? ---
+void Init_Hardware(void);
+void Init_Game_Data(void);
+void Update_Paddle_Pos(void);
+void Beep(void);
+void Draw_Game(void);
 
-// ==================== Main Program ====================
+// ==========================================
+//                 ?????
+// ==========================================
+void Init_Hardware(void)
+{
+    SYS_Init();
+    init_LCD();
+    clear_LCD();
+    OpenKeyPad();
+
+    // --- ADC ??? (?? VR1 @ PA7/ADC7) ---
+    
+    // 1. ????? (??!)
+    SYS->REGWRPROT = 0x59;
+    SYS->REGWRPROT = 0x16;
+    SYS->REGWRPROT = 0x88;
+
+    // 2. ?? PA7 ? ADC7 ?? (MFP)
+    // [??] ??? (1<<0),???? bit 7
+    SYS->GPA_MFP |= (1UL << ADC_VR_CHANNEL); 
+
+    // 3. ?? ADC ??
+    CLK->APBCLK |= (1UL << 28);     // Enable ADC Clock
+    CLK->CLKSEL1 &= ~(0x3UL << 2);  // ?? 12MHz (HXT) - Slide 28 ??
+    CLK->CLKDIV &= ~(0xFFUL << 16); // Divider = 1
+
+    // 4. ?????
+    SYS->REGWRPROT = 0x00;
+
+    // 5. ?????? (?? PA7)
+    // [??] ?? PA7 ? Input mode (PMD[15:14] = 00)
+    PA->PMD &= ~(0x3UL << (ADC_VR_CHANNEL * 2));
+    // [??] ?? PA7 ??????? (OFFD) - Slide 23 ??
+    PA->OFFD |= (1UL << ADC_VR_CHANNEL);
+
+    // 6. ?? ADC ??
+    ADC->ADCR |= (1UL << 0);    // ADEN
+    
+    // [??] ?? Channel 7
+    ADC->ADCHER |= (1UL << ADC_VR_CHANNEL);  
+    
+    // ----------------------------------------
+    
+    // ?????? (PB11)
+    PB->PMD &= ~(0x3UL << (BUZZER_PIN * 2)); 
+    PB->PMD |= (0x1UL << (BUZZER_PIN * 2));
+    PB->DOUT |= (1UL << BUZZER_PIN); 
+}
+
+// ==========================================
+//               ??????
+// ==========================================
+
+void Init_Game_Data(void)
+{
+    int speed = 4;
+
+    g_obstacle.x = 56; 
+    g_obstacle.y = 8; 
+    g_obstacle.w = OBSTACLE_W;
+    g_obstacle.h = OBSTACLE_H;
+
+    g_paddle.x = 56; 
+    g_paddle.y = LCD_H - PADDLE_H; 
+    g_paddle.w = PADDLE_W;
+    g_paddle.h = PADDLE_H;
+
+    g_ball.x = (LCD_W - BALL_SIZE) / 2;
+    g_ball.y = (LCD_H - BALL_SIZE) / 2;
+    g_ball.w = BALL_SIZE;
+    g_ball.h = BALL_SIZE;
+    
+    g_ball.dx = (rand() % 2 == 0) ? speed : -speed;
+    g_ball.dy = (rand() % 2 == 0) ? speed : -speed;
+}
+
+void Update_Paddle_Pos(void)
+{
+    uint32_t adc_val = 0;
+    int i;
+    
+    // ????? (?8?)
+    for(i = 0; i < 8; i++) 
+    {
+        // ?? ADC
+        ADC->ADCR |= (1UL << 11); 
+        // ????
+        while(ADC->ADCR & (1UL << 11));
+        
+        // [??] ?? Channel 7 ??? (ADDR[7])
+        adc_val += (ADC->ADDR[ADC_VR_CHANNEL] & 0xFFF);
+    }
+    
+    adc_val = adc_val / 8;
+    
+    // ??: 0~4095 -> 0 ~ (128 - 16)
+    g_paddle.x = (adc_val * (LCD_W - PADDLE_W)) / 4096;
+}
+
+void Beep(void)
+{
+    PB->DOUT &= ~(1UL << BUZZER_PIN); 
+    CLK_SysTickDelay(50000);
+    PB->DOUT |= (1UL << BUZZER_PIN);  
+}
+
+int Check_Collision(Rect *rect, BallObj *ball)
+{
+    if (ball->x < rect->x + rect->w &&
+        ball->x + ball->w > rect->x &&
+        ball->y < rect->y + rect->h &&
+        ball->y + ball->h > rect->y)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+void Draw_Game(void)
+{
+    clear_LCD();
+    draw_Bmp8x8(g_ball.x, g_ball.y, 1, 0, bmp_ball);
+    draw_Bmp16x8(g_paddle.x, g_paddle.y, 1, 0, bmp_block);
+    draw_Bmp16x8(g_obstacle.x, g_obstacle.y, 1, 0, bmp_block);
+}
+
+// ==========================================
+//                  ???
+// ==========================================
 int main(void)
 {
-    uint32_t vr_val;
-    int16_t target_x;
-    int16_t diff;
+    Init_Hardware();
+    srand(123); 
 
-    SYS_Init();
-    
-    OpenKeyPad();
-    Init_ADC();     
-    Init_Buzzer();  
-    init_LCD();
-    clear_LCD(); 
-
-    // Initialize paddle and ball positions
-    paddle_x = (LCD_WIDTH - PADDLE_WIDTH) / 2;
-    old_paddle_x = paddle_x;
-    
-    ball_x = (LCD_WIDTH - BALL_SIZE) / 2;
-    ball_y = (LCD_HEIGHT - BALL_SIZE) / 2;
-    old_ball_x = ball_x;
-    old_ball_y = ball_y;
-
-    // Draw the fixed obstacle at the start
-    Fill_Rect(OBSTACLE_X, OBSTACLE_Y,
-              OBSTACLE_X + OBSTACLE_WIDTH,
-              OBSTACLE_Y + OBSTACLE_HEIGHT, 1);
-    
-    while (1) {
-
-        // ========= 1. Read ADC (Potentiometer) =========
-        vr_val = Read_VR();
-
-        // Convert VR (0~4095) to paddle X position
-        target_x = (vr_val * (LCD_WIDTH - PADDLE_WIDTH)) / 4095;
-        
-        old_paddle_x = paddle_x;
-
-        // ========= 2. Smooth paddle movement =========
-        diff = target_x - paddle_x;
-        
-        // Limit maximum paddle movement per frame
-        if (abs(diff) > MAX_PADDLE_SPEED) {
-            if (diff > 0)
-                paddle_x += MAX_PADDLE_SPEED;
-            else
-                paddle_x -= MAX_PADDLE_SPEED;
-        } 
-        else {
-            paddle_x = target_x;
+    while(1)
+    {
+        if (g_state == STATE_INIT)
+        {
+            Init_Game_Data();
+            Draw_Game();
+            
+            while(ScanKey() == 0) {
+                Update_Paddle_Pos(); 
+                Draw_Game(); 
+                CLK_SysTickDelay(50000);
+            }
+            g_state = STATE_PLAYING;
         }
+        else if (g_state == STATE_PLAYING)
+        {
+            Update_Paddle_Pos();
 
-        // ========= 3. Game State Machine =========
-        switch (game_state) {
+            g_ball.x += g_ball.dx;
+            g_ball.y += g_ball.dy;
 
-            case 0: // Idle
-            case 2: // Game Over screen
-                Check_Start_Key();
-                break;
-                
-            case 1: // Playing
-                old_ball_x = ball_x;
-                old_ball_y = ball_y;
-                Update_Game_Logic();
-                break;
+            // ????
+            if (g_ball.x <= 0) {
+                g_ball.x = 0;
+                g_ball.dx = -g_ball.dx;
+            } 
+            else if (g_ball.x >= LCD_W - BALL_SIZE) {
+                g_ball.x = LCD_W - BALL_SIZE;
+                g_ball.dx = -g_ball.dx;
+            }
+
+            if (g_ball.y <= 0) {
+                g_ball.y = 0;
+                g_ball.dy = -g_ball.dy;
+            }
+
+            // Game Over
+            if (g_ball.y >= LCD_H - BALL_SIZE) {
+                g_state = STATE_GAMEOVER; 
+                CLK_SysTickDelay(200000); 
+            }
+
+            // ????
+            if (Check_Collision(&g_paddle, &g_ball)) {
+                g_ball.dy = -g_ball.dy;
+                g_ball.y = g_paddle.y - BALL_SIZE; 
+                Beep();
+            }
+
+            if (Check_Collision(&g_obstacle, &g_ball)) {
+                g_ball.dy = -g_ball.dy;
+                Beep();
+            }
+
+            Draw_Game();
+            CLK_SysTickDelay(100000); 
         }
-
-        // ========= 4. Render Scene =========
-        Draw_Game_Scene();
-        
-        // ========= 5. Frame Delay =========
-        CLK_SysTickDelay(GAME_DELAY_TIME); 
-    }
-}
-
-// ==================== Draw a Filled Rectangle ====================
-void Fill_Rect(int16_t x1, int16_t y1,
-               int16_t x2, int16_t y2,
-               uint8_t color)
-{
-    int16_t i, j;
-    for (i = x1; i < x2; i++) {
-        for (j = y1; j < y2; j++) {
-            draw_Pixel(i, j, color, color);
+        else if (g_state == STATE_GAMEOVER)
+        {
+            clear_LCD();
+            printS(30, 24, "GAME OVER");
+            
+            while(ScanKey() == 0);
+            CLK_SysTickDelay(500000); 
+            g_state = STATE_INIT;
         }
     }
 }
-
-// ==================== Drawing the Entire Frame ====================
-void Draw_Game_Scene(void)
-{
-    // Clear previous paddle and ball
-    Fill_Rect(old_paddle_x, PADDLE_Y,
-              old_paddle_x + PADDLE_WIDTH,
-              PADDLE_Y + PADDLE_HEIGHT, 0);
-
-    Fill_Rect(old_ball_x, old_ball_y,
-              old_ball_x + BALL_SIZE,
-              old_ball_y + BALL_SIZE, 0);
-
-    // Draw obstacle (hide it when game over)
-    if (game_state == 2) {
-        Fill_Rect(OBSTACLE_X, OBSTACLE_Y,
-                  OBSTACLE_X + OBSTACLE_WIDTH,
-                  OBSTACLE_Y + OBSTACLE_HEIGHT, 0);
-    } 
-    else {
-        Fill_Rect(OBSTACLE_X, OBSTACLE_Y,
-                  OBSTACLE_X + OBSTACLE_WIDTH,
-                  OBSTACLE_Y + OBSTACLE_HEIGHT, 1);
-    }
-
-    // Draw paddle (not shown during Game Over)
-    if (game_state != 2) {
-        Fill_Rect(paddle_x, PADDLE_Y,
-                  paddle_x + PADDLE_WIDTH,
-                  PADDLE_Y + PADDLE_HEIGHT, 1);
-    }
-
-    // Draw ball (only during gameplay)
-    if (game_state == 1) {
-        Fill_Rect(ball_x, ball_y,
-                  ball_x + BALL_SIZE,
-                  ball_y + BALL_SIZE, 1);
-    }
-    
-    // Draw Game Over text
-    if (game_state == 2) {
-        printS(30, 24, "GAME OVER");
-    }
-}
-
-// ==================== Start Game on Key Press ====================
-void Check_Start_Key(void)
-{
-    uint8_t key = ScanKey();
-
-    // Accept keypad 1–9 as valid start keys
-    if (key >= 1 && key <= 9) {
-
-        if (game_state == 2) {
-            clear_LCD(); 
-        }
-
-        game_state = 1; 
-        
-        // Reset ball to center
-        ball_x = (LCD_WIDTH - BALL_SIZE) / 2;
-        ball_y = (LCD_HEIGHT - BALL_SIZE) / 2;
-        old_ball_x = ball_x;
-        old_ball_y = ball_y;
-        
-        // Randomize initial direction
-        srand(Read_VR() + ball_x);
-        ball_dx = (rand() % 2) ? BALL_SPEED : -BALL_SPEED;
-        ball_dy = -BALL_SPEED; 
-        
-        // Small delay to avoid bouncing
-        CLK_SysTickDelay(500000); 
-    }
-}
-
-// ==================== Game Logic Update ====================
-void Update_Game_Logic(void)
-{
-    ball_x += ball_dx;
-    ball_y += ball_dy;
-
-    // -------- Wall collision (Left/Right) --------
-    if (ball_x <= 0) { 
-        ball_x = 0;
-        ball_dx = abs(ball_dx);
-    }
-    else if (ball_x_
