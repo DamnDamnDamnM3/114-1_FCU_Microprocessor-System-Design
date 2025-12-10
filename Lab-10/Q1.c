@@ -68,31 +68,44 @@ void Process_Keys(void);
  */
 void TMR0_IRQHandler(void)
 {
-    // 只有在動畫運行狀態下才處理
+    // 區域變數宣告（C89 標準要求所有變數宣告必須放在函數開頭）
+    uint32_t total_seconds; // 總秒數（用於計算七段顯示器的顯示值）
+
+    // 只有在動畫運行狀態下才執行以下操作
     if (is_running)
     {
-        animation_counter++; // 動畫計數器遞增
+        // ========== 1. 動畫控制邏輯 ==========
+        animation_counter++; // 動畫計數器遞增（每次中斷 +1）
 
-        // 當計數器達到速度設定值時，切換到下一幀
+        // 檢查是否達到當前速度設定值（需要多少次中斷才切換一幀）
         if (animation_counter >= speed_settings[speed_index])
         {
-            animation_counter = 0;                   // 重置計數器
+            animation_counter = 0;                   // 重置動畫計數器
             current_frame = (current_frame + 1) % 6; // 切換到下一幀（循環 0-5）
-            lcd_update_flag = 1;                     // 設定 LCD 更新標誌
-
-            // 更新時間計數器（單位：0.01秒）
-            time_counter++;
-
-            // 將時間計數器轉換為四位數字，存入七段顯示器陣列
-            // seg_digit[3] = 千位數, seg_digit[2] = 百位數
-            // seg_digit[1] = 十位數, seg_digit[0] = 個位數
-            seg_digit[3] = (time_counter / 1000) % 10; // 千位數
-            seg_digit[2] = (time_counter / 100) % 10;  // 百位數
-            seg_digit[1] = (time_counter / 10) % 10;   // 十位數
-            seg_digit[0] = time_counter % 10;          // 個位數
+            lcd_update_flag = 1;                     // 設定 LCD 更新標誌，通知主程式更新畫面
         }
+
+        // ========== 2. 時間計數 ==========
+        time_counter++; // 時間計數器遞增（每 10ms +1，單位：0.01秒）
+
+        // ========== 3. 數值轉換（將時間計數器轉換為七段顯示器數字）==========
+        // 將時間計數器（單位：0.01秒）轉換為總秒數
+        // 例如：time_counter = 1234 → total_seconds = 12.34 秒（取整數部分）
+        total_seconds = time_counter / 100;
+
+        // 將總秒數分解為四位數字，存入七段顯示器陣列
+        // seg_digit[0]: 個位數（0-9）
+        seg_digit[0] = total_seconds % 10;
+        // seg_digit[1]: 十位數（0-9）
+        seg_digit[1] = (total_seconds / 10) % 10;
+        // seg_digit[2]: 百位數（0-9）
+        seg_digit[2] = (total_seconds / 100) % 10;
+        // seg_digit[3]: 千位數（0-9）
+        seg_digit[3] = (total_seconds / 1000) % 10;
     }
-    TIMER_ClearIntFlag(TIMER0); // 清除 Timer0 中斷標誌
+
+    // 清除 Timer0 中斷標誌（必須執行，否則會持續觸發中斷）
+    TIMER_ClearIntFlag(TIMER0);
 }
 
 // ==================== 5. Timer1 中斷處理函數（1kHz = 每 1ms 觸發一次）====================
