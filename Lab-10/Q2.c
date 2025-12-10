@@ -111,56 +111,51 @@ void TMR0_IRQHandler(void)
     TIMER_ClearIntFlag(TIMER0);
 }
 
-// ==================== 5. Timer1 中斷處理函數（1kHz = 每 1ms 觸發一次）====================
-/**
- * @brief Timer1 中斷服務程式
- * @details 負責兩個任務：
- *          1. 七段顯示器多工掃描（每秒掃描 1000 次，每個數字 250 次）
- *          2. 按鍵掃描和防彈跳處理（每 20ms 掃描一次）
- */
+// ==================== 5. Timer1 中斷處理函數 (修正按鍵靈敏度版) ====================
 void TMR1_IRQHandler(void)
 {
-    // 使用 static 變數保持狀態（符合 C89 標準）
-    static uint8_t scan_index = 0;        // 七段顯示器掃描索引（0-3）
-    static uint8_t key_check_counter = 0; // 按鍵掃描計數器
+    // 使用 static 變數保持狀態
+    static uint8_t scan_index = 0;       
+    static uint8_t key_check_counter = 0;
+    static uint8_t prev_key = 0; // [新增] 用來記錄「上一次」的按鍵值
     uint8_t temp_key;
 
-    // ========== 任務 1: 七段顯示器多工掃描 ==========
-    // 關閉所有七段顯示器（避免鬼影）
+    // ========== 任務 1: 七段顯示器多工掃描 (維持不變) ==========
     CloseSevenSegment();
-    // 顯示當前掃描位置的數字
     ShowSevenSegment(scan_index, seg_digit[scan_index]);
-    // 移動到下一個位置
     scan_index++;
-    if (scan_index > 3)
-        scan_index = 0; // 循環掃描 0-3
+    if (scan_index > 3) scan_index = 0; 
 
-    // ========== 任務 2: 按鍵掃描（防彈跳處理）==========
+    // ========== 任務 2: 按鍵掃描 (改良版) ==========
     key_check_counter++;
-    if (key_check_counter >= 20)
-    { // 每 20ms 掃描一次按鍵（50Hz 掃描頻率）
+    
+    // [修改] 將檢查間隔從 20ms 縮短為 10ms，提高反應速度
+    if (key_check_counter >= 10) { 
         key_check_counter = 0;
-
-        temp_key = ScanKey(); // 讀取按鍵值
-
-        if (temp_key != 0)
-        {
-            // 偵測到按鍵按下
-            if (key_lock == 0)
-            {
-                // 如果按鍵未鎖定，儲存按鍵值並鎖定
-                key_buffer = temp_key; // 將按鍵值存入緩衝區
-                key_lock = 1;          // 鎖定按鍵，防止重複觸發
+        
+        temp_key = ScanKey(); // 讀取當前按鍵
+        
+        // [核心修改] 去彈跳邏輯：
+        // 只有當「這次讀到的值」跟「上次讀到的值」一樣時，才視為穩定訊號
+        if (temp_key == prev_key) {
+            
+            if (temp_key != 0) {
+                // 確認是穩定的「按下」狀態
+                if (key_lock == 0) {
+                    key_buffer = temp_key; // 寫入 Buffer
+                    key_lock = 1;          // 鎖定，避免長按重複觸發
+                }
+            } else {
+                // 確認是穩定的「放開」狀態 (temp_key 為 0)
+                key_lock = 0; // 解除鎖定，允許下一次按壓
             }
         }
-        else
-        {
-            // 當 ScanKey 返回 0（無按鍵按下），解除鎖定
-            key_lock = 0;
-        }
+        
+        // 更新歷史狀態，供下一次比較用
+        prev_key = temp_key;
     }
 
-    TIMER_ClearIntFlag(TIMER1); // 清除 Timer1 中斷標誌
+    TIMER_ClearIntFlag(TIMER1);
 }
 
 // ==================== 6. Timer 初始化函數 ====================
