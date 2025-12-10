@@ -72,29 +72,31 @@ void Process_Keys(void);
  */
 void TMR0_IRQHandler(void)
 {
-    // 只有在動畫運行狀態下才處理
+    // 宣告必須放在最前面
+    uint32_t total_seconds; 
+
     if (is_running) {
-        animation_counter++;  // 動畫計數器遞增
-        
-        // 當計數器達到速度設定值時，切換到下一幀
+        // --- 1. 動畫控制 ---
+        animation_counter++;
         if (animation_counter >= speed_settings[speed_index]) {
-            animation_counter = 0;                    // 重置計數器
-            current_frame = (current_frame + 1) % 6;  // 切換到下一幀（循環 0-5）
-            lcd_update_flag = 1;                       // 設定 LCD 更新標誌
-            
-            // 更新時間計數器（單位：0.01秒）
-            time_counter++;
-            
-            // 將時間計數器轉換為四位數字，存入七段顯示器陣列
-            // seg_digit[3] = 千位數, seg_digit[2] = 百位數
-            // seg_digit[1] = 十位數, seg_digit[0] = 個位數
-            seg_digit[3] = (time_counter / 1000) % 10;  // 千位數
-            seg_digit[2] = (time_counter / 100) % 10;   // 百位數
-            seg_digit[1] = (time_counter / 10) % 10;   // 十位數
-            seg_digit[0] = time_counter % 10;           // 個位數
+            animation_counter = 0;
+            current_frame = (current_frame + 1) % 6;
+            lcd_update_flag = 1;
         }
+        
+        // --- 2. 時間計算 ---
+        time_counter++;
+        
+        // --- 3. 數值轉換 ---
+        // 這裡只做運算，不宣告變數
+        total_seconds = time_counter / 100;
+
+        seg_digit[0] = total_seconds % 10;
+        seg_digit[1] = (total_seconds / 10) % 10;
+        seg_digit[2] = (total_seconds / 100) % 10;
+        seg_digit[3] = (total_seconds / 1000) % 10;
     }
-    TIMER_ClearIntFlag(TIMER0);  // 清除 Timer0 中斷標誌
+    TIMER_ClearIntFlag(TIMER0);
 }
 
 // ==================== 5. Timer1 中斷處理函數（1kHz = 每 1ms 觸發一次）====================
