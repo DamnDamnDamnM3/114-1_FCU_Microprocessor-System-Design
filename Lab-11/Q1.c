@@ -1,38 +1,51 @@
-//
-// Lab11-1: Fast Forward Clock (Selector Logic Fixed)
-// EVB : Nu-LB-NUC140
-//
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
-#include "NUC100Series.h"
-#include "MCU_init.h"
-#include "SYS_init.h"
-#include "LCD.h"
-#include "Draw2D.h"
-#include "Scankey.h" 
+/*
+ * ================================================================
+ * Lab 11-1: 快速前進時鐘系統 (Fast Forward Clock)
+ * 功能：實作一個可設定的時鐘系統，支援快速前進模式和時間調整功能
+ * 硬體：Nu-LB-NUC140開發板，NUC140VE3CN微控制器
+ * 作者：damnm3@googlegroups.com 共同作者
+ * ================================================================
+ * 
+ * 主要特性：
+ * - 時鐘以15倍速前進（每15秒分鐘+1）
+ * - 支援設定模式，可調整分鐘和秒數
+ * - LCD顯示時鐘圖形和時間
+ * - 使用Timer0中斷驅動時鐘更新
+ * - 使用外部中斷切換設定模式
+ */
 
-#define PI 3.1415926
+#include <stdio.h>              // 標準輸入輸出函數
+#include <math.h>               // 數學函數（sin, cos）
+#include <string.h>             // 字串處理函數
+#include "NUC100Series.h"       // NUC100系列微控制器定義
+#include "MCU_init.h"          // 微控制器初始化函數
+#include "SYS_init.h"          // 系統初始化函數
+#include "LCD.h"               // LCD顯示函數庫
+#include "Draw2D.h"            // 2D繪圖函數庫
+#include "Scankey.h"           // 按鍵掃描函數
 
-// --- Visual Settings ---
-#define X0 96  
-#define Y0 32  
-#define R_SEC 20
-#define R_MIN 14 
+#define PI 3.1415926           // 圓周率常數
 
-// --- Global Variables ---
-volatile int8_t g_min = 0;   
-volatile int8_t g_sec = 0;   
-volatile uint8_t g_setup_mode = 0; 
-volatile uint8_t g_update_flag = 1; 
+// --- 視覺設定 ---
+#define X0 96                   // 時鐘中心X座標（LCD寬度128的一半）
+#define Y0 32                   // 時鐘中心Y座標（LCD高度64的一半）
+#define R_SEC 20                // 秒針長度（像素）
+#define R_MIN 14                // 分針長度（像素）
 
-// 0 = Edit Minutes, 1 = Edit Seconds
+// --- 全域變數 ---
+volatile int8_t g_min = 0;      // 分鐘值（0-11，12小時制）
+volatile int8_t g_sec = 0;      // 秒數值（0-59）
+volatile uint8_t g_setup_mode = 0;  // 設定模式標記（0=正常模式，1=設定模式）
+volatile uint8_t g_update_flag = 1; // 顯示更新標記（1=需要更新）
+
+// 編輯目標標記（0=編輯分鐘，1=編輯秒數）
 volatile uint8_t g_edit_target = 0; 
 
-int16_t old_sec_x = X0, old_sec_y = Y0;
-int16_t old_min_x = X0, old_min_y = Y0;
+// 指針舊位置（用於清除舊的指針線）
+int16_t old_sec_x = X0, old_sec_y = Y0;  // 秒針舊位置
+int16_t old_min_x = X0, old_min_y = Y0;  // 分針舊位置
 
-// Clock Bitmap
+// 時鐘點陣圖資料（64x64像素，單色）
 unsigned char bmp_Clock[64*8] = {
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x80,0x80,0xC0,0x60,0x20,0x30,0xD0,0x98,0x08,0x8C,0x04,0x06,0x06,0x02,0x02,0x02,0x03,0x03,0xF1,0x01,0x13,0x93,0x51,0x31,0x03,0x03,0x02,0x02,0x02,0x06,0x06,0x04,0x0C,0x88,0x18,0x10,0x70,0x20,0x60,0xC0,0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x00,0x00,0x00,0x00,0x00,0xC0,0x60,0x38,0x0C,0x06,0x03,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x1F,0x00,0x1F,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x03,0x01,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1D,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x03,0x06,0x0C,0x30,0x60,0xC0,0x00,0x00,0x00,0x00,0x00,
@@ -44,172 +57,237 @@ unsigned char bmp_Clock[64*8] = {
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x01,0x03,0x06,0x04,0x0C,0x1A,0x11,0x10,0x30,0x20,0x60,0x60,0x40,0x40,0x40,0xC0,0xC0,0x80,0x8F,0xD2,0xCA,0x8E,0x80,0xC0,0xC0,0x40,0x40,0x40,0x60,0x60,0x21,0x31,0x11,0x19,0x0A,0x0C,0x04,0x06,0x03,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
 };
 
-// Wrapper for LCD library mismatch
+/*
+ * ================================================================
+ * LCD列印函數包裝器
+ * 功能：統一LCD列印函數介面
+ * ================================================================
+ */
 void print_lcd(int line, char *str) {
     print_Line(line, str);
 }
 
-// --- INTERRUPT HANDLERS ---
+// ================================================================
+// 中斷服務常式 (Interrupt Service Routines)
+// ================================================================
 
-// 1. TIMER0 ISR (Drives the clock ticks)
+/*
+ * ================================================================
+ * Timer0中斷處理函數
+ * 功能：驅動時鐘更新（1Hz，每秒觸發一次）
+ * ================================================================
+ */
 void TMR0_IRQHandler(void)
 {
-    TIMER_ClearIntFlag(TIMER0);
+    TIMER_ClearIntFlag(TIMER0);  // 清除Timer0中斷標記
 
+    // 只有在正常模式下才更新時鐘
     if (!g_setup_mode) {
-        g_sec++;
-        if (g_sec >= 60) g_sec = 0;
+        g_sec++;                  // 秒數加1
+        if (g_sec >= 60) g_sec = 0;  // 秒數超過59則歸零
 
+        // 每15秒分鐘加1（快速前進模式）
         if (g_sec % 15 == 0) {
             g_min++;
-            if (g_min >= 12) g_min = 0;
+            if (g_min >= 12) g_min = 0;  // 分鐘超過11則歸零（12小時制）
         }
-        g_update_flag = 1;
+        g_update_flag = 1;        // 設定顯示更新標記
     }
 }
 
-// 2. EINT1 ISR (Mode Toggle)
+/*
+ * ================================================================
+ * 外部中斷1處理函數（模式切換）
+ * 功能：切換正常模式和設定模式
+ * 觸發：PB15按鈕按下（下降緣觸發）
+ * ================================================================
+ */
 void EINT1_IRQHandler(void)
 {
-    GPIO_CLR_INT_FLAG(PB, BIT15);
-    g_setup_mode = !g_setup_mode;
+    GPIO_CLR_INT_FLAG(PB, BIT15);  // 清除外部中斷標記
+    g_setup_mode = !g_setup_mode;   // 切換設定模式狀態
     
-    // When setup mode starts, default to editing Minutes (or keep last selection)
+    // 進入設定模式時，預設編輯分鐘
     if(g_setup_mode) {
-        PC12 = 0; // ON
-        g_edit_target = 0; // Default to Min when entering setup
+        PC12 = 0;                   // LED亮起（指示設定模式）
+        g_edit_target = 0;         // 預設編輯分鐘
     }
-    else PC12 = 1; // OFF
+    else {
+        PC12 = 1;                   // LED熄滅（正常模式）
+    }
 }
 
-// --- INITIALIZATION ---
+// ================================================================
+// 初始化函數
+// ================================================================
 
+/*
+ * ================================================================
+ * Timer0初始化函數（1Hz時鐘）
+ * 功能：設定Timer0為1Hz週期性模式，用於時鐘更新
+ * ================================================================
+ */
 void Init_Timer0_1Hz(void)
 {
-    CLK_EnableModuleClock(TMR0_MODULE);
-    CLK_SetModuleClock(TMR0_MODULE, CLK_CLKSEL1_TMR0_S_HXT, 0);
-    TIMER_Open(TIMER0, TIMER_PERIODIC_MODE, 1); // 1 Hz
-    TIMER_EnableInt(TIMER0);
-    NVIC_EnableIRQ(TMR0_IRQn);
-    TIMER_Start(TIMER0);
+    CLK_EnableModuleClock(TMR0_MODULE);  // 啟用Timer0模組時鐘
+    CLK_SetModuleClock(TMR0_MODULE, CLK_CLKSEL1_TMR0_S_HXT, 0);  // 設定時鐘來源為HXT
+    TIMER_Open(TIMER0, TIMER_PERIODIC_MODE, 1);  // 開啟Timer0，週期性模式，1Hz
+    TIMER_EnableInt(TIMER0);             // 啟用Timer0中斷
+    NVIC_EnableIRQ(TMR0_IRQn);           // 啟用NVIC中斷
+    TIMER_Start(TIMER0);                  // 啟動Timer0
 }
 
+/*
+ * ================================================================
+ * 顯示更新函數
+ * 功能：更新LCD上的時鐘顯示（時間文字和指針）
+ * ================================================================
+ */
 void Update_Display() {
-    char text[20];
-    double angle_sec, angle_min;
-    int16_t new_sec_x, new_sec_y;
-    int16_t new_min_x, new_min_y;
+    char text[20];                        // 時間文字緩衝區
+    double angle_sec, angle_min;         // 秒針和分針的角度（弧度）
+    int16_t new_sec_x, new_sec_y;         // 秒針新位置座標
+    int16_t new_min_x, new_min_y;         // 分針新位置座標
 
-    // Show indicator of what we are editing in Setup Mode
+    // 在LCD第一行顯示時間文字（格式：MM:SS）
     if (g_setup_mode) {
-        if (g_edit_target == 0) sprintf(text, "%02d:%02d", g_min, g_sec);
-        else                    sprintf(text, "%02d:%02d", g_min, g_sec);
+        // 設定模式下顯示時間（無額外空格）
+        sprintf(text, "%02d:%02d", g_min, g_sec);
     } else {
+        // 正常模式下顯示時間（末尾有空格）
         sprintf(text, "%02d:%02d ", g_min, g_sec);
     }
     print_lcd(0, text); 
 
-    // Erase Old
+    // 清除舊的指針線（用背景色重繪）
     draw_Line(old_sec_x, old_sec_y, X0, Y0, BG_COLOR, BG_COLOR);
     draw_Line(old_min_x, old_min_y, X0, Y0, BG_COLOR, BG_COLOR);
 
-    // Calc New
+    // 計算新的指針位置
+    // 秒針角度：每秒6度（360度/60秒），減90度使12點方向為0度
     angle_sec = (g_sec * 6 - 90) * PI / 180.0; 
-    new_sec_x = X0 + (int16_t)(R_SEC * cos(angle_sec));
-    new_sec_y = Y0 + (int16_t)(R_SEC * sin(angle_sec));
+    new_sec_x = X0 + (int16_t)(R_SEC * cos(angle_sec));  // 秒針X座標
+    new_sec_y = Y0 + (int16_t)(R_SEC * sin(angle_sec));  // 秒針Y座標
 
+    // 分針角度：每分鐘30度（360度/12小時），減90度使12點方向為0度
     angle_min = (g_min * 30 - 90) * PI / 180.0;
-    new_min_x = X0 + (int16_t)(R_MIN * cos(angle_min));
-    new_min_y = Y0 + (int16_t)(R_MIN * sin(angle_min));
+    new_min_x = X0 + (int16_t)(R_MIN * cos(angle_min));  // 分針X座標
+    new_min_y = Y0 + (int16_t)(R_MIN * sin(angle_min));  // 分針Y座標
 
-    // Draw New
-    draw_Line(new_min_x, new_min_y, X0, Y0, FG_COLOR, BG_COLOR);
-    draw_Line(new_sec_x, new_sec_y, X0, Y0, FG_COLOR, BG_COLOR); 
+    // 繪製新的指針線（用前景色）
+    draw_Line(new_min_x, new_min_y, X0, Y0, FG_COLOR, BG_COLOR);  // 分針
+    draw_Line(new_sec_x, new_sec_y, X0, Y0, FG_COLOR, BG_COLOR); // 秒針
 
+    // 更新舊位置記錄（供下次清除使用）
     old_sec_x = new_sec_x;
     old_sec_y = new_sec_y;
     old_min_x = new_min_x;
     old_min_y = new_min_y;
 }
 
+/*
+ * ================================================================
+ * 主程式
+ * 功能：系統初始化和主迴圈
+ * ================================================================
+ */
 int32_t main(void)
 {
-    uint8_t key;
-    int8_t val_to_add = 0;
+    uint8_t key;                 // 按鍵掃描結果
+    int8_t val_to_add = 0;       // 時間調整值（+5, +10, -5, -10）
 
-    // 1. System Init
+    // ================================================================
+    // 1. 系統初始化
+    // ================================================================
     SYS_Init();
 
-    // 2. Hardware Init
+    // ================================================================
+    // 2. 硬體初始化
+    // ================================================================
+    // PC12設為輸出模式（LED指示燈）
     GPIO_SetMode(PC, BIT12, GPIO_MODE_OUTPUT); 
-    PC12 = 1; 
+    PC12 = 1;                    // LED初始為熄滅狀態
+    
+    // PB15設為輸入模式（外部中斷按鈕）
     GPIO_SetMode(PB, BIT15, GPIO_MODE_INPUT);
-    GPIO_EnableEINT1(PB, 15, GPIO_INT_FALLING);
-    NVIC_EnableIRQ(EINT1_IRQn);
+    GPIO_EnableEINT1(PB, 15, GPIO_INT_FALLING);  // 啟用外部中斷1，下降緣觸發
+    NVIC_EnableIRQ(EINT1_IRQn);  // 啟用NVIC中斷
 
-    // 3. Display Init
-    init_LCD();
-    clear_LCD();
-    draw_Bmp64x64(64, 0, FG_COLOR, BG_COLOR, bmp_Clock);
+    // ================================================================
+    // 3. 顯示器初始化
+    // ================================================================
+    init_LCD();                  // 初始化LCD
+    clear_LCD();                  // 清除LCD畫面
+    draw_Bmp64x64(64, 0, FG_COLOR, BG_COLOR, bmp_Clock);  // 繪製時鐘圖形
 
-    // 4. Timer Init
-    Init_Timer0_1Hz();
+    // ================================================================
+    // 4. Timer初始化
+    // ================================================================
+    Init_Timer0_1Hz();            // 初始化Timer0為1Hz
 
-    // 5. Keypad
-    OpenKeyPad();
+    // ================================================================
+    // 5. 按鍵掃描初始化
+    // ================================================================
+    OpenKeyPad();                 // 開啟按鍵掃描功能
 
-    // 6. Start
+    // ================================================================
+    // 6. 啟用全域中斷
+    // ================================================================
     __enable_irq();
 
+    // ================================================================
+    // 主程式迴圈
+    // ================================================================
     while(1)
     {
+        // 檢查是否需要更新顯示
         if (g_update_flag) {
-            Update_Display();
-            g_update_flag = 0;
+            Update_Display();     // 更新時鐘顯示
+            g_update_flag = 0;    // 清除更新標記
         }
 
+        // 設定模式下的按鍵處理
         if (g_setup_mode) {
-            key = ScanKey();
+            key = ScanKey();      // 掃描按鍵
             if (key != 0) {
-                
-                val_to_add = 0;
+                val_to_add = 0;   // 重置調整值
 
-                // --- 1. Mode Selectors ---
+                // --- 1. 模式選擇按鍵 ---
                 if (key == 1) {
-                    g_edit_target = 0; // Edit Minutes
-                    g_update_flag = 1;
+                    g_edit_target = 0;  // 選擇編輯分鐘
+                    g_update_flag = 1;  // 標記需要更新顯示
                 }
                 else if (key == 2) {
-                    g_edit_target = 1; // Edit Seconds
-                    g_update_flag = 1;
+                    g_edit_target = 1;  // 選擇編輯秒數
+                    g_update_flag = 1;  // 標記需要更新顯示
                 }
                 
-                // --- 2. Determine Value Change ---
-                else if (key == 4) val_to_add = 5;
-                else if (key == 5) val_to_add = 10;
-                else if (key == 7) val_to_add = -5;
-                else if (key == 8) val_to_add = -10;
+                // --- 2. 數值調整按鍵 ---
+                else if (key == 4) val_to_add = 5;    // 增加5
+                else if (key == 5) val_to_add = 10;   // 增加10
+                else if (key == 7) val_to_add = -5;   // 減少5
+                else if (key == 8) val_to_add = -10;  // 減少10
 
-                // --- 3. Apply Change ---
+                // --- 3. 套用變更 ---
                 if (val_to_add != 0) {
                     if (g_edit_target == 0) { 
-                        // Modify Minutes (Range 0-11)
+                        // 修改分鐘（範圍0-11）
                         g_min += val_to_add;
-                        // Handle Wrapping
+                        // 處理溢位（循環）
                         while (g_min < 0) g_min += 12;
                         while (g_min >= 12) g_min -= 12;
                     } 
                     else { 
-                        // Modify Seconds (Range 0-59)
+                        // 修改秒數（範圍0-59）
                         g_sec += val_to_add;
-                        // Handle Wrapping
+                        // 處理溢位（循環）
                         while (g_sec < 0) g_sec += 60;
                         while (g_sec >= 60) g_sec -= 60;
                     }
-                    g_update_flag = 1;
+                    g_update_flag = 1;  // 標記需要更新顯示
                 }
 
-                CLK_SysTickDelay(200000); // Debounce
+                CLK_SysTickDelay(200000);  // 防彈跳延遲（200ms）
             }
         }
     }
